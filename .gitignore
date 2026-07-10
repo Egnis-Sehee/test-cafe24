@@ -3,3 +3,6 @@
 # Cafe24 주문서 폼(ec_orderform)은 서버 관리 영역이라 다운로드 시 루트(/)를 가리키는
 # 깨진 심링크로 생성된다. VSCode/rg 무한 프로세스 crash를 유발하므로 추적하지 않는다.
 **/order/ec_orderform/
+
+# web/upload 등은 Cafe24 파일업로더가 런타임에 관리하는 영역 — 버전관리 대상 아님.
+/web/

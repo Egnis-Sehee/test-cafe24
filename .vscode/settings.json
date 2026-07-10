@@ -1,4 +1,5 @@
 {
+  "editor.formatOnSave": false,
   "search.followSymlinks": false,
   "search.exclude": {
     "**/order/ec_orderform/**": true
