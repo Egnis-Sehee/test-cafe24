@@ -1,0 +1,9 @@
+{
+  "search.followSymlinks": false,
+  "search.exclude": {
+    "**/order/ec_orderform/**": true
+  },
+  "files.watcherExclude": {
+    "**/order/ec_orderform/**": true
+  }
+}
