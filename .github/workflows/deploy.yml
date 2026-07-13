@@ -1,7 +1,12 @@
 name: Deploy to Cafe24 (skin1)
 
-# main 에 src/ 변경이 push되면 prod 스킨(/skin1)으로 배포.
-# 수동 실행(workflow_dispatch)은 dry-run(기본값)으로 안전하게 미리 검증 가능.
+# 배포 대상: src/ (스킨 코드) -> Cafe24 prod 스킨 /skin1
+#
+#  - main 에 src/ 변경이 push되면 자동으로 "증분 배포"(바뀐 파일만).
+#  - 수동 실행은 모드를 골라서 실행 (증분 / 전량), dry-run 으로 미리보기 가능.
+#
+# 참고: push 로 돌다 실패한 건 그 run 의 "Re-run jobs" 로 재실행하는 게 정석이다.
+#       (원래 이벤트의 직전 커밋 정보가 유지되어 증분이 그대로 재현됨)
 on:
   push:
     branches: [main]
@@ -9,15 +14,30 @@ on:
       - 'src/**'
   workflow_dispatch:
     inputs:
+      mode:
+        description: '배포 방식'
+        type: choice
+        options:
+          - incremental
+          - full
+        default: incremental
+      base_sha:
+        description: '증분 기준 커밋 (비우면 직전 커밋). mode=incremental 일 때만 사용'
+        required: false
+        type: string
       dry_run:
         description: 'dry-run: 실제 업로드 없이 무엇을 올릴지만 출력'
         type: boolean
         default: true
 
-# 배포가 겹치지 않게 직렬화 (동시 실행 방지)
+# 배포가 겹치지 않게 직렬화
 concurrency:
   group: deploy-cafe24-skin1
   cancel-in-progress: false
+
+env:
+  LOCAL_DIR: src
+  REMOTE_DIR: /skin1
 
 jobs:
   deploy:
@@ -28,35 +48,138 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # git diff 가 이전 커밋에 접근하려면 전체 히스토리가 필요 (기본은 shallow)
+          fetch-depth: 0
 
       - name: Install lftp
         run: sudo apt-get update && sudo apt-get install -y lftp
 
-      - name: Deploy via SFTP (mirror, no delete)
+      - name: 배포 계획 수립 (증분/전량 결정)
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_MODE: ${{ github.event.inputs.mode }}
+          IN_BASE: ${{ github.event.inputs.base_sha }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          : > changed.txt
+
+          use_full() {
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "::notice::[전량] src/ 전체를 /skin1 로 동기화합니다."
+          }
+
+          # 1) 수동 + full 이면 전량
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "${IN_MODE:-}" = "full" ]; then
+            use_full
+            exit 0
+          fi
+
+          # 2) 증분 기준 커밋 결정
+          if [ "$EVENT" = "push" ]; then
+            BASE="${BEFORE:-}"                       # push 직전 커밋
+          else
+            BASE="${IN_BASE:-}"                      # 수동 입력값
+            [ -z "$BASE" ] && BASE="$(git rev-parse HEAD~1)"
+          fi
+
+          # 3) 기준 커밋이 없거나(신규 브랜치/force-push) 유효하지 않으면 전량으로 폴백
+          if [ -z "$BASE" ] \
+             || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "::warning::기준 커밋(${BASE:-none})을 찾을 수 없어 전량 동기화로 폴백합니다."
+            use_full
+            exit 0
+          fi
+
+          # 4) 추가/수정/이름변경된 파일만 (삭제 D 는 제외 — 서버 파일은 지우지 않음)
+          git diff --name-only --diff-filter=ACMR "$BASE" "$SHA" -- "$LOCAL_DIR/" > changed.txt || true
+          COUNT=$(wc -l < changed.txt | tr -d ' ')
+
+          # 5) git 에서 삭제된 파일은 서버에 그대로 남는다 — 조용히 넘어가지 않고 알린다
+          git diff --name-only --diff-filter=D "$BASE" "$SHA" -- "$LOCAL_DIR/" > deleted.txt || true
+          if [ -s deleted.txt ]; then
+            echo "::warning::git 에서 삭제된 아래 파일은 서버(/skin1)에 그대로 남습니다. 필요하면 수동 정리하세요."
+            sed 's/^/  (서버에 잔존) /' deleted.txt
+          fi
+
+          echo "mode=incremental" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "::notice::[증분] 기준=${BASE} · 업로드 대상 ${COUNT}개"
+          if [ "$COUNT" -gt 0 ]; then
+            sed 's/^/  /' changed.txt
+          else
+            echo "  (변경된 src/ 파일 없음 — 업로드할 것 없음)"
+          fi
+
+      - name: Deploy via SFTP
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_PORT: ${{ secrets.FTP_PORT }}
           FTP_USER: ${{ secrets.FTP_USERNAME }}
           FTP_PASS: ${{ secrets.FTP_PASSWORD }}
-          # 수동실행 시 dry_run 입력값(push 이벤트에서는 비어있음 -> 실제 배포)
+          MODE: ${{ steps.plan.outputs.mode }}
+          COUNT: ${{ steps.plan.outputs.count }}
+          # push 이벤트에서는 비어있음 -> 실제 배포
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
-          DRY=""
-          if [ "$DRY_RUN" = "true" ]; then
-            DRY="--dry-run"
-            echo "::notice::DRY-RUN 모드 — 실제 업로드 없이 계획만 출력합니다."
+          set -euo pipefail
+          DRY="${DRY_RUN:-}"
+
+          # --- 증분 ---------------------------------------------------------
+          if [ "$MODE" = "incremental" ]; then
+            if [ "${COUNT:-0}" -eq 0 ]; then
+              echo "업로드할 파일이 없습니다. 종료."
+              exit 0
+            fi
+            if [ "$DRY" = "true" ]; then
+              echo "::notice::DRY-RUN — 아래 ${COUNT}개를 업로드할 예정입니다 (실제 업로드 안 함)."
+              sed 's/^/  would upload: /' changed.txt
+              exit 0
+            fi
+            # 비밀번호가 argv/파일에 남지 않도록 lftp stdin 으로 명령을 흘려보냄
+            {
+              echo "set sftp:auto-confirm yes"
+              echo "set net:timeout 20"
+              echo "set net:max-retries 3"
+              echo "open sftp://${FTP_HOST}:${FTP_PORT}"
+              echo "user \"${FTP_USER}\" \"${FTP_PASS}\""
+              while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                rel="${f#${LOCAL_DIR}/}"
+                dir="$(dirname "$rel")"
+                if [ "$dir" = "." ]; then
+                  echo "put -O \"${REMOTE_DIR}\" \"$f\""
+                else
+                  echo "mkdir -p -f \"${REMOTE_DIR}/${dir}\""
+                  echo "put -O \"${REMOTE_DIR}/${dir}\" \"$f\""
+                fi
+              done < changed.txt
+              echo "bye"
+            } | lftp
+            echo "✅ 증분 배포 완료 (${COUNT}개)"
+            exit 0
           fi
-          # heredoc 로 비밀번호를 argv 에 노출하지 않고 stdin 으로 전달
+
+          # --- 전량 ---------------------------------------------------------
+          MIRROR_DRY=""
+          if [ "$DRY" = "true" ]; then
+            MIRROR_DRY="--dry-run"
+            echo "::notice::DRY-RUN — 실제 업로드 없이 계획만 출력합니다."
+          fi
           lftp <<LFTP
           set sftp:auto-confirm yes
           set net:timeout 20
           set net:max-retries 3
           set net:reconnect-interval-base 5
-          open sftp://$FTP_HOST:$FTP_PORT
-          user "$FTP_USER" "$FTP_PASS"
-          mirror --reverse --verbose $DRY \
+          open sftp://${FTP_HOST}:${FTP_PORT}
+          user "${FTP_USER}" "${FTP_PASS}"
+          mirror --reverse --verbose ${MIRROR_DRY} \
             --exclude 'order/ec_orderform' \
             --exclude-glob '.DS_Store' \
-            src/ /skin1/
+            ${LOCAL_DIR}/ ${REMOTE_DIR}/
           bye
           LFTP
