@@ -1,0 +1,62 @@
+name: Deploy to Cafe24 (skin1)
+
+# main 에 src/ 변경이 push되면 prod 스킨(/skin1)으로 배포.
+# 수동 실행(workflow_dispatch)은 dry-run(기본값)으로 안전하게 미리 검증 가능.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-run: 실제 업로드 없이 무엇을 올릴지만 출력'
+        type: boolean
+        default: true
+
+# 배포가 겹치지 않게 직렬화 (동시 실행 방지)
+concurrency:
+  group: deploy-cafe24-skin1
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: SFTP deploy src/ -> /skin1
+    runs-on: ubuntu-latest
+    # prod 성역 강제: production 환경의 secrets/보호규칙(main 브랜치 한정)을 통과해야 배포됨
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install lftp
+        run: sudo apt-get update && sudo apt-get install -y lftp
+
+      - name: Deploy via SFTP (mirror, no delete)
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
+          FTP_USER: ${{ secrets.FTP_USERNAME }}
+          FTP_PASS: ${{ secrets.FTP_PASSWORD }}
+          # 수동실행 시 dry_run 입력값(push 이벤트에서는 비어있음 -> 실제 배포)
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          DRY=""
+          if [ "$DRY_RUN" = "true" ]; then
+            DRY="--dry-run"
+            echo "::notice::DRY-RUN 모드 — 실제 업로드 없이 계획만 출력합니다."
+          fi
+          # heredoc 로 비밀번호를 argv 에 노출하지 않고 stdin 으로 전달
+          lftp <<LFTP
+          set sftp:auto-confirm yes
+          set net:timeout 20
+          set net:max-retries 3
+          set net:reconnect-interval-base 5
+          open sftp://$FTP_HOST:$FTP_PORT
+          user "$FTP_USER" "$FTP_PASS"
+          mirror --reverse --verbose $DRY \
+            --exclude 'order/ec_orderform' \
+            --exclude-glob '.DS_Store' \
+            src/ /skin1/
+          bye
+          LFTP
