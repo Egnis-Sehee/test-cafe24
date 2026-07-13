@@ -18,6 +18,12 @@ name: Deploy to Cafe24 (skin1)
 #
 # 주의: 어떤 모드도 서버 파일을 삭제하지 않는다(--delete 미사용). git 에서 지운 파일은
 #       서버에 남으며, 그 사실을 warning 으로 알려준다.
+#
+# 함정: Cafe24 SFTP 는 chmod 를 허용하지 않는다(관리형 호스팅). lftp mirror 는 기본적으로
+#       전송 후 권한을 로컬과 맞추려 chmod 를 시도하는데, 서버가 이를 거부해
+#       "chmod: Access failed: permission denied" 후 exit 1 로 죽는다.
+#       파일 전송 자체는 전부 성공했는데도 배포가 '실패'로 표시되는 거짓 실패였다.
+#       -> mirror 에 --no-perms 를 주어 권한 설정 시도 자체를 하지 않는다.
 on:
   push:
     branches: [main]
@@ -188,7 +194,7 @@ jobs:
           set net:reconnect-interval-base 5
           open sftp://${FTP_HOST}:${FTP_PORT}
           user "${FTP_USER}" "${FTP_PASS}"
-          mirror --reverse --verbose ${MIRROR_DRY} \
+          mirror --reverse --verbose --no-perms ${MIRROR_DRY} \
             --exclude 'order/ec_orderform' \
             --exclude-glob '.DS_Store' \
             ${LOCAL_DIR}/ ${REMOTE_DIR}/
