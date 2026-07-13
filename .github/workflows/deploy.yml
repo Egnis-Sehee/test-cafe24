@@ -2,11 +2,22 @@ name: Deploy to Cafe24 (skin1)
 
 # 배포 대상: src/ (스킨 코드) -> Cafe24 prod 스킨 /skin1
 #
-#  - main 에 src/ 변경이 push되면 자동으로 "증분 배포"(바뀐 파일만).
-#  - 수동 실행은 모드를 골라서 실행 (증분 / 전량), dry-run 으로 미리보기 가능.
+# [배포 모드]
+#   incremental : 바뀐 파일만 올린다. git diff(내용 해시)로 변경분을 뽑아 그것만 put.
+#                 평소 배포는 전부 이것. 몇 초면 끝나고 라이브 영향이 최소다.
+#   full        : src/ 전체를 다시 올린다(lftp mirror). 느리고 파일마다 remove→put 이라
+#                 라이브에 순간 404 창이 생긴다. 베이스라인 최초 1회 / 서버가 git 과
+#                 어긋난 것 같을 때 재동기화 / 복구용으로만 쓴다.
+#
+# [트리거]
+#   main 에 src/ 변경 push  ->  incremental 로 자동 배포 (실제 업로드)
+#   수동 실행(Run workflow) ->  mode / base_sha / dry_run 을 골라서 실행
 #
 # 참고: push 로 돌다 실패한 건 그 run 의 "Re-run jobs" 로 재실행하는 게 정석이다.
 #       (원래 이벤트의 직전 커밋 정보가 유지되어 증분이 그대로 재현됨)
+#
+# 주의: 어떤 모드도 서버 파일을 삭제하지 않는다(--delete 미사용). git 에서 지운 파일은
+#       서버에 남으며, 그 사실을 warning 으로 알려준다.
 on:
   push:
     branches: [main]
@@ -15,18 +26,18 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '배포 방식'
+        description: 'incremental = 바뀐 파일만 올림(평소 배포) / full = src 전체를 다시 올림(베이스라인·재동기화·복구용)'
         type: choice
         options:
           - incremental
           - full
         default: incremental
       base_sha:
-        description: '증분 기준 커밋 (비우면 직전 커밋). mode=incremental 일 때만 사용'
+        description: '[incremental 전용] 이 커밋 이후 바뀐 파일을 올림. 비워두면 직전 커밋(HEAD~1) 기준. full 이면 무시됨'
         required: false
         type: string
       dry_run:
-        description: 'dry-run: 실제 업로드 없이 무엇을 올릴지만 출력'
+        description: '체크하면 실제 업로드 없이 "무엇을 올릴지" 목록만 출력 (안전 미리보기)'
         type: boolean
         default: true
 
